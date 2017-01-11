@@ -538,13 +538,15 @@ describe('Quotes', function () {
     })
 
     it('quotes a multi-hop route', function * () {
-      yield this.messageRouter.receiveRoutes([{
-        source_ledger: 'eur-ledger.',
-        destination_ledger: 'random-ledger.',
-        min_message_window: 1,
-        source_account: 'eur-ledger.mary',
-        points: [ [0, 0], [10000, 20000] ]
-      }], 'eur-ledger.mary')
+      yield this.messageRouter.receiveRoutes({ hold_down_time: 1234,
+                                               unreachable_through_me: [],
+                                               new_routes:
+                                               [{ source_ledger: 'eur-ledger.',
+                                                  destination_ledger: 'random-ledger.',
+                                                  min_message_window: 1,
+                                                  source_account: 'eur-ledger.mary',
+                                                  points: [ [0, 0], [10000, 20000] ]
+                                                }]}, 'eur-ledger.mary')
 
       const quote = yield this.messageRouter.getQuote({
         source_amount: '100',

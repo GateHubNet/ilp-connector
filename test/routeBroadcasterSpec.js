@@ -90,7 +90,8 @@ describe('RouteBroadcaster', function () {
       autoloadPeers: true,
       peers: [],
       ledgerCredentials,
-      configRoutes
+      configRoutes,
+      routeExpiry: 1234
     })
 
     this.tables.addRoute({
@@ -131,7 +132,8 @@ describe('RouteBroadcaster', function () {
         source_account: ledgerA + 'mark',
         points: [ [0, -0.01], [200, 99.99] ],
         destination_precision: 10,
-        destination_scale: 2
+        destination_scale: 2,
+        added_during_epoch: 0
       }, {
         source_ledger: ledgerA,
         destination_ledger: ledgerC,
@@ -139,7 +141,8 @@ describe('RouteBroadcaster', function () {
         source_account: ledgerA + 'mark',
         points: [ [0, 0], [0.02, 0], [100.02, 60], [200, 60] ],
         destination_precision: 10,
-        destination_scale: 2
+        destination_scale: 2,
+        added_during_epoch: 0
       }
     ]
     const routesFromB = [
@@ -150,7 +153,8 @@ describe('RouteBroadcaster', function () {
         source_account: ledgerB + 'mark',
         points: [ [0, -0.01], [100, 199.99] ],
         destination_precision: 10,
-        destination_scale: 2
+        destination_scale: 2,
+        added_during_epoch: 0
       }
     ]
 
@@ -185,7 +189,9 @@ describe('RouteBroadcaster', function () {
         assert.deepEqual(message, {
           ledger: ledgerA,
           account: ledgerA + 'mary',
-          data: { method: 'broadcast_routes', data: routesFromA }
+          data: { method: 'broadcast_routes', data: { hold_down_time: 1234,
+                                                      unreachable_through_me: [],
+                                                      new_routes: routesFromA } }
         })
         routesFromASent = true
         return Promise.resolve(null)
@@ -195,7 +201,9 @@ describe('RouteBroadcaster', function () {
         assert.deepEqual(message, {
           ledger: ledgerB,
           account: ledgerB + 'mary',
-          data: { method: 'broadcast_routes', data: routesFromB }
+          data: { method: 'broadcast_routes', data: { hold_down_time: 1234,
+                                                      unreachable_through_me: [],
+                                                      new_routes: routesFromB } }
         })
         routesFromBSent = true
         return Promise.resolve(null)
