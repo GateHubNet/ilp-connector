@@ -10,7 +10,7 @@ class InfoCache {
   }
 
   * getInfoUncached (ledger) {
-    return yield this.ledgers.getPlugin(ledger).getInfo()
+    return yield this.ledgers.getPlugin(ledger)
   }
 
   * get (ledger) {
