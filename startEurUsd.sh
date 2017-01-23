@@ -28,4 +28,4 @@ DEBUG='*' CONNECTOR_LEDGERS='{
     }
   }
 
-}' node src/index.js
+}' CONNECTOR_BACKEND='@interledger/backend' node src/index.js
