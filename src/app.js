@@ -85,17 +85,12 @@ function createApp (config, ledgers, backend, routeBuilder, routeBroadcaster, ro
   }
 
   if (!backend) {
-    if (!infoCache) {
-      infoCache = new InfoCache(ledgers)
-    }
-console.log('info cache', infoCache.getPlugin)
-
     const Backend = getBackend(config.get('backend'))
     backend = new Backend({
       currencyWithLedgerPairs: ledgers.getPairs(),
       backendUri: config.get('backendUri'),
       spread: config.get('fxSpread'),
-      getInfo: (ledger) => ledgers.getPlugin(ledger).getInfo()
+      getInfo: (ledger) => ledgers.getPlugin(ledger)
     })
   }
 
