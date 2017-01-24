@@ -11,7 +11,6 @@ const RoutingTables = require('./lib/routing-tables')
 const RouteBuilder = require('./lib/route-builder')
 const RouteBroadcaster = require('./lib/route-broadcaster')
 const Ledgers = require('./lib/ledgers')
-const InfoCache = require('./lib/info-cache')
 const BalanceCache = require('./lib/balance-cache')
 const MessageRouter = require('./lib/message-router')
 
@@ -41,7 +40,7 @@ function listen (config, ledgers, backend, routeBuilder, routeBroadcaster, messa
   }).catch((err) => log.error(err))
 }
 
-function addPlugin (config, ledgers, backend, routeBroadcaster, infoCache, id, options, tradesTo, tradesFrom) {
+function addPlugin (config, ledgers, backend, routeBroadcaster, id, options, tradesTo, tradesFrom) {
   return co(function * () {
     options.prefix = id
     ledgers.add(id, options, tradesTo, tradesFrom)
@@ -65,7 +64,7 @@ function getPlugin (ledgers, id) {
   return ledgers.getPlugin(id)
 }
 
-function createApp (config, ledgers, backend, routeBuilder, routeBroadcaster, routingTables, infoCache, balanceCache, messageRouter) {
+function createApp (config, ledgers, backend, routeBuilder, routeBroadcaster, routingTables, balanceCache, messageRouter) {
   if (!config) {
     config = loadConfig()
   }
@@ -96,14 +95,13 @@ console.log('info cache', infoCache.getPlugin)
       currencyWithLedgerPairs: ledgers.getPairs(),
       backendUri: config.get('backendUri'),
       spread: config.get('fxSpread'),
-      infoCache: infoCache
+      getInfo: (ledger) => ledgers.getPlugin(ledger).getInfo()
     })
   }
 
   if (!routeBuilder) {
     routeBuilder = new RouteBuilder(
       routingTables,
-      infoCache,
       ledgers,
       {
         minMessageWindow: config.expiry.minMessageWindow,
@@ -117,7 +115,6 @@ console.log('info cache', infoCache.getPlugin)
       routingTables,
       backend,
       ledgers,
-      infoCache,
       {
         configRoutes: config.configRoutes,
         minMessageWindow: config.expiry.minMessageWindow,
@@ -148,7 +145,7 @@ console.log('info cache', infoCache.getPlugin)
   return {
     getClient: ledgers.getClient.bind(ledgers),
     listen: _.partial(listen, config, ledgers, backend, routeBuilder, routeBroadcaster, messageRouter),
-    addPlugin: _.partial(addPlugin, config, ledgers, backend, routeBroadcaster, infoCache),
+    addPlugin: _.partial(addPlugin, config, ledgers, backend, routeBroadcaster),
     removePlugin: _.partial(removePlugin, config, ledgers, backend, routingTables, routeBroadcaster),
     getPlugin: _.partial(getPlugin, ledgers)
   }
