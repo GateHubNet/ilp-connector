@@ -86,16 +86,19 @@ describe('ILPQuoter', function () {
     this.backend = new Backend({
       currencyWithLedgerPairs: this.pairs,
       backendUri: this.backendUri,
+      quotePrecision: precision,
       getInfo: (ledger) => this.ledgers.getPlugin(ledger).getInfo()
     })
 
     const testLedgers = _.flatMap(this.pairs, (pair) => pair)
 
+    // note that this ledger API is imaginary, just for the purpose of this test.
+    // It's different from the fivebells ledger's API, for instance.
     _.each(testLedgers, (ledgerUri) => {
       nock('http://' + ledgerUri).get('/')
       .reply(200, {
-        precision: precision,
-        scale: scale
+        currency_code: 'doesn\'t matter, the connector will ignore this',
+        currency_scale: scale
       }).persist()
     })
   })
@@ -128,6 +131,7 @@ describe('ILPQuoter', function () {
       this.backend = new Backend({
         currencyWithLedgerPairs: this.unsupportedPairs,
         backendUri: this.backendUri,
+        quotePrecision: precision,
         getInfo: (ledger) => this.ledgers.getPlugin(ledger).getInfo()
       })
 
@@ -157,7 +161,7 @@ describe('ILPQuoter', function () {
       const scope = nock(this.backendUri)
                       .get('/quote/EUR/USD/100000000/source').query({precision, scale}).reply(200, { source_amount: 123.89, destination_amount: 88.77 })
       const quoteResponse = yield this.backend.getCurve(quote)
-      expect(quoteResponse.points).to.deep.equal([ [0, 0], [123.89, 88.77] ])
+      expect(quoteResponse.points).to.deep.equal([ [0, 0], [1238900, 887700] ])
       expect(scope.isDone()).to.be.true
     })
 
@@ -169,7 +173,7 @@ describe('ILPQuoter', function () {
       const scope = nock(this.backendUri)
                       .get('/quote/EUR/USD/100000000/source').query({precision, scale}).reply(200, { source_amount: 99.77, destination_amount: 123.89 })
       const quoteResponse = yield this.backend.getCurve(quote)
-      expect(quoteResponse.points).to.deep.equal([ [0, 0], [99.77, 123.89] ])
+      expect(quoteResponse.points).to.deep.equal([ [0, 0], [997700, 1238900] ])
       expect(scope.isDone()).to.be.true
     })
 
@@ -210,7 +214,7 @@ describe('ILPQuoter', function () {
                                                                  }
                                                                })
       const quoteResponse = yield this.backend.getCurve(quote)
-      expect(quoteResponse.points).to.deep.equal([ [0, 0], [99.77, 123.89] ])
+      expect(quoteResponse.points).to.deep.equal([ [0, 0], [997700, 1238900] ])
       expect(quoteResponse.additional_info).to.be.deep.equal({ rate: 'somerate' })
       expect(scope.isDone()).to.be.true
     })

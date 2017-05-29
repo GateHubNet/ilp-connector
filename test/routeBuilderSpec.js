@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('assert')
+const packet = require('ilp-packet')
 const RoutingTables = require('../src/lib/routing-tables')
 const RouteBuilder = require('../src/lib/route-builder')
 const appHelper = require('./helpers/app')
@@ -21,6 +22,10 @@ const carlC = 'cny-ledger.carl'
 const markA = 'usd-ledger.mark'
 const markB = 'eur-ledger.mark'
 const maryB = 'eur-ledger.mary'
+
+const mockPlugin = require('./mocks/mockPlugin')
+const mock = require('mock-require')
+mock('ilp-plugin-mock', mockPlugin)
 
 describe('RouteBuilder', function () {
   logHelper(logger)
@@ -52,9 +57,12 @@ describe('RouteBuilder', function () {
       routingTables: this.tables
     })
     this.ledgers.addFromCredentialsConfig(ledgerCredentials)
-    this.ledgers.getPlugin(ledgerA).getInfo =
-    this.ledgers.getPlugin(ledgerB).getInfo =
-      function () { return {precision: 10, scale: 2} }
+    this.ledgers.getPlugin(ledgerA).getInfo = this.ledgers.getPlugin(ledgerB).getInfo = function () {
+      return {
+        currencyCode: 'doesn\'t matter, the connector will ignore this',
+        currencyScale: 2
+      }
+    }
 
     this.tables.addLocalRoutes(this.ledgers, [{
       source_ledger: ledgerA,
@@ -98,9 +106,9 @@ describe('RouteBuilder', function () {
         assert.deepStrictEqual(quoteTransfer, {
           connectorAccount: markA,
           sourceLedger: ledgerA,
-          sourceAmount: '200.00',
+          sourceAmount: '200',
           destinationLedger: ledgerB,
-          destinationAmount: '99.00',
+          destinationAmount: '99',
           sourceExpiryDuration: '6',
           destinationExpiryDuration: '5',
           additionalInfo: {
@@ -108,11 +116,12 @@ describe('RouteBuilder', function () {
             slippage: '1'
           },
           minMessageWindow: 1,
-          nextLedger: ledgerB
+          nextLedger: ledgerB,
+          liquidityCurve: [ [2, 0], [200, 99] ]
         })
       })
-
-      it('returns a quote with slippage in the final amount', function * () {
+      // disabled because of reduced quoting functionality for improved-route-broadcast
+      it.skip('returns a quote with slippage in the final amount', function * () {
         const quoteTransfer = yield this.builder.getQuote({
           sourceAddress: aliceA,
           destinationAddress: carlC,
@@ -129,11 +138,12 @@ describe('RouteBuilder', function () {
           destinationExpiryDuration: '5',
           additionalInfo: { slippage: '0.25' },
           minMessageWindow: 2,
-          nextLedger: ledgerB
+          nextLedger: ledgerB,
+          liquidityCurve: [ [1, 0], [200, 49.75] ]
         })
       })
-
-      it('allows a specified slippage', function * () {
+      // disabled because of reduced quoting functionality for improved-route-broadcast
+      it.skip('allows a specified slippage', function * () {
         const quoteTransfer = yield this.builder.getQuote({
           sourceAddress: aliceA,
           destinationAddress: carlC,
@@ -151,13 +161,15 @@ describe('RouteBuilder', function () {
           destinationExpiryDuration: '5',
           additionalInfo: { slippage: '2.5' },
           minMessageWindow: 2,
-          nextLedger: ledgerB
+          nextLedger: ledgerB,
+          liquidityCurve: [ [10, 0], [200, 47.5] ]
         })
       })
     })
 
     describe('fixed destinationAmount', function () {
-      it('returns a quote with slippage in the source amount', function * () {
+      // disabled because of reduced quoting functionality for improved-route-broadcast
+      it.skip('returns a quote with slippage in the source amount', function * () {
         const quoteTransfer = yield this.builder.getQuote({
           sourceAddress: aliceA,
           destinationAddress: carlC,
@@ -174,7 +186,8 @@ describe('RouteBuilder', function () {
           destinationExpiryDuration: '5',
           additionalInfo: { slippage: '-1' },
           minMessageWindow: 2,
-          nextLedger: ledgerB
+          nextLedger: ledgerB,
+          liquidityCurve: [ [1, 0], [201, 50] ]
         })
       })
 
@@ -185,7 +198,7 @@ describe('RouteBuilder', function () {
             destinationAddress: 'ledgerD.doraD',
             destinationAmount: '25'
           })
-        }.bind(this), error('This connector does not support the given asset pair'))
+        }.bind(this), error('No route found from: usd-ledger.alice to: ledgerD.doraD'))
       })
     })
 
@@ -202,8 +215,8 @@ describe('RouteBuilder', function () {
           destination_scale: 0
         })
       })
-
-      it('Local quote should return additional info', function * () {
+      // disabled because of reduced quoting functionality for improved-route-broadcast
+      it.skip('Local quote should return additional info', function * () {
         const quoteTransfer = yield this.builder.getQuote({
           sourceAddress: aliceA,
           destinationAddress: carlC,
@@ -221,7 +234,8 @@ describe('RouteBuilder', function () {
           destinationExpiryDuration: '5',
           additionalInfo: { slippage: '0.25' },
           minMessageWindow: 2,
-          nextLedger: ledgerB
+          nextLedger: ledgerB,
+          liquidityCurve: [ [1, 0], [200, 49.75] ]
         })
       })
     })
@@ -229,18 +243,17 @@ describe('RouteBuilder', function () {
 
   describe('getDestinationTransfer', function () {
     it('returns the original destination transfer when the connector can settle it', function * () {
+      const ilpPacket = packet.serializeIlpPayment({
+        account: bobB,
+        amount: '50'
+      }).toString('base64')
       const destinationTransfer = yield this.builder.getDestinationTransfer({
         id: 'fd7ecefd-8eb8-4e16-b7c8-b67d9d6995f5',
         ledger: ledgerA,
         direction: 'incoming',
         account: aliceA,
         amount: '100',
-        data: {
-          ilp_header: {
-            account: bobB,
-            amount: '50'
-          }
-        }
+        ilp: ilpPacket
       })
       assert.deepEqual(destinationTransfer, {
         id: 'd9600d94-f171-4443-83f5-c4c685fa70cd',
@@ -253,12 +266,7 @@ describe('RouteBuilder', function () {
           source_transfer_ledger: ledgerA,
           source_transfer_amount: '100'
         },
-        data: {
-          ilp_header: {
-            account: bobB,
-            amount: '50'
-          }
-        }
+        ilp: ilpPacket
       })
     })
 
@@ -269,12 +277,10 @@ describe('RouteBuilder', function () {
         direction: 'incoming',
         account: aliceA,
         amount: '100',
-        data: {
-          ilp_header: {
-            account: bobB,
-            amount: '50'
-          }
-        }
+        ilp: packet.serializeIlpPayment({
+          account: bobB,
+          amount: '50'
+        }).toString('base64')
       })
       assert.deepEqual(destinationTransfer, {
         id: '628cc7c4-4046-4815-897d-78895741efd9',
@@ -287,35 +293,27 @@ describe('RouteBuilder', function () {
           source_transfer_ledger: ledgerA,
           source_transfer_amount: '100'
         },
-        data: {
-          ilp_header: {
-            account: bobB,
-            amount: '50'
-          }
-        }
+        ilp: packet.serializeIlpPayment({
+          account: bobB,
+          amount: '50'
+        }).toString('base64')
       })
     })
 
-    it('passes on the ilp_header', function * () {
+    it('passes on the ILP packet', function * () {
+      const ilpPacket = packet.serializeIlpPayment({
+        account: bobB,
+        amount: '50'
+      }).toString('base64')
       const destinationTransfer = yield this.builder.getDestinationTransfer({
         id: 'fd7ecefd-8eb8-4e16-b7c8-b67d9d6995f5',
         ledger: ledgerA,
         direction: 'incoming',
         account: aliceA,
         amount: '100',
-        data: {
-          ilp_header: {
-            account: bobB,
-            amount: '50'
-          }
-        }
+        ilp: ilpPacket
       })
-      assert.deepEqual(destinationTransfer.data, {
-        ilp_header: {
-          account: bobB,
-          amount: '50'
-        }
-      })
+      assert.deepEqual(destinationTransfer.ilp, ilpPacket)
     })
 
     describe('with a route from ledgerB → ledgerC', function () {
@@ -330,18 +328,17 @@ describe('RouteBuilder', function () {
       })
 
       it('returns an intermediate destination transfer when the connector knows a route to the destination', function * () {
+        const ilpPacket = packet.serializeIlpPayment({
+          account: carlC,
+          amount: '25'
+        }).toString('base64')
         const destinationTransfer = yield this.builder.getDestinationTransfer({
           id: '123',
           ledger: ledgerA,
           direction: 'incoming',
           account: aliceA,
           amount: '100',
-          data: {
-            ilp_header: {
-              account: carlC,
-              amount: '25'
-            }
-          },
+          ilp: ilpPacket,
           executionCondition: 'yes',
           cancellationCondition: 'no',
           expiresAt: '2015-06-16T00:00:01.000Z'
@@ -351,13 +348,8 @@ describe('RouteBuilder', function () {
           ledger: ledgerB,
           direction: 'outgoing',
           account: maryB,
-          amount: '50.00',
-          data: {
-            ilp_header: {
-              account: carlC,
-              amount: '25'
-            }
-          },
+          amount: '50',
+          ilp: ilpPacket,
           noteToSelf: {
             source_transfer_id: '123',
             source_transfer_ledger: ledgerA,
@@ -378,14 +370,12 @@ describe('RouteBuilder', function () {
           direction: 'incoming',
           account: aliceA,
           amount: '100',
-          data: {
-            ilp_header: {
-              account: carlC,
-              amount: '50'
-            }
-          }
+          ilp: packet.serializeIlpPayment({
+            account: carlC,
+            amount: '50'
+          }).toString('base64')
         })
-      }.bind(this), error('This connector does not support the given asset pair'))
+      }.bind(this), error('No route found from: usd-ledger. to: cny-ledger.carl'))
     })
 
     it('throws when the source transfer has no destination transfer', function * () {
@@ -397,7 +387,7 @@ describe('RouteBuilder', function () {
           amount: '100',
           data: {}
         })
-      }.bind(this), error('source transfer is missing ilp_header in memo'))
+      }.bind(this), error('source transfer is missing "ilp"'))
     })
   })
 })

@@ -36,4 +36,20 @@ describe('PluginStore', function () {
     yield this.obj.put('k', str)
     assert.equal(yield this.obj.get('k'), str)
   })
+
+  it('should not create a store with an invalid name', function * () {
+    const name = ('"; drop table "Users; --')
+    try {
+      const store = new PluginStore('sqlite://:memory:', name)
+      assert(!store, 'constructor should have thrown an error')
+    } catch (e) {
+      assert.match(e.message, new RegExp(name))
+    }
+  })
+
+  it('should create a store with dashes in the name', function * () {
+    const name = ('a-name-with-dashes')
+    const store = new PluginStore('sqlite://:memory:', name)
+    assert.isOk(store)
+  })
 })

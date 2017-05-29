@@ -8,6 +8,8 @@ const validate = require('./validate').validate
 const quoteModel = require('../models/quote')
 const log = require('../common/log').create('message-router')
 
+const PEER_LEDGER_PREFIX = 'peer.'
+
 /**
  * @param {Object} opts
  * @param {Config} opts.config
@@ -34,12 +36,13 @@ function MessageRouter (opts) {
  */
 MessageRouter.prototype.handleMessage = function (message) {
   if (!message.data) return Promise.resolve(null)
-  return this.handleRequest(message.data, message.account).then(
+  return this.handleRequest(message.data, message.from).then(
     (responseData) => {
       if (!responseData) return
       return this.ledgers.getPlugin(message.ledger).sendMessage({
         ledger: message.ledger,
-        account: message.account,
+        from: message.to,
+        to: message.from,
         data: responseData
       })
     })
@@ -96,7 +99,7 @@ MessageRouter.prototype._handleRequest = function * (request, sender) {
     return
   }
 
-  throw new InvalidBodyError('Invalid method')
+  log.debug('ignoring unkown request method', request.method)
 }
 
 /**
@@ -105,18 +108,43 @@ MessageRouter.prototype._handleRequest = function * (request, sender) {
  * @param {Route[]} routes
  * @param {IlpAddress} sender
  */
-MessageRouter.prototype.receiveRoutes = function * (routes, sender) {
-  validate('Routes', routes)
-  let gotNewRoute = false
+MessageRouter.prototype.receiveRoutes = function * (payload, sender) {
+  validate('RoutingUpdate', payload)
+  log.debug('receiveRoutes sender:', sender)
+  let routes = payload.new_routes
 
-  for (const route of routes) {
-    // We received a route from another connector, but that connector
-    // doesn't actually belong to the route, so ignore it.
-    if (route.source_account !== sender) continue
-    if (this.routingTables.addRoute(route)) gotNewRoute = true
+  let holdDownTime = payload.hold_down_time
+  this.routingTables.bumpConnector(sender, holdDownTime)
+  let potentiallyUnreachableLedgers = payload.unreachable_through_me
+  let lostLedgerLinks = []
+  if (potentiallyUnreachableLedgers.length > 0) {
+    log.info('informed of broken routes to:', potentiallyUnreachableLedgers, ' through:', sender)
+    for (const ledger of potentiallyUnreachableLedgers) {
+      lostLedgerLinks.push(...this.routingTables.invalidateConnectorsRoutesTo(sender, ledger))
+    }
   }
 
-  if (gotNewRoute && this.config.routeBroadcastEnabled) {
+  if (routes.length === 0 && lostLedgerLinks.length === 0) { // just a heartbeat
+    log.info('got heartbeat from:', sender)
+    return
+  }
+
+  let gotNewRoute = false
+  for (const route of routes) {
+    // We received a route from another connector, but that route
+    // doesn't actually belong to the connector, so ignore it.
+    if (route.source_account !== sender) continue
+    // make sure source_account is on source_ledger:
+    if (!route.source_account.startsWith(route.source_ledger)) continue
+    // The destination_ledger can be any ledger except one that starts with `peer.`.
+    if (route.destination_ledger.startsWith(PEER_LEDGER_PREFIX)) continue
+    if (this.routingTables.addRoute(route)) gotNewRoute = true
+  }
+  log.debug('receiveRoutes sender:', sender, ' provided ', routes.length, ' any new?:', gotNewRoute)
+
+  if ((gotNewRoute || (lostLedgerLinks.length > 0)) &&
+      this.config.routeBroadcastEnabled) {
+    this.routeBroadcaster.markLedgersUnreachable(lostLedgerLinks)
     co(this.routeBroadcaster.broadcast.bind(this.routeBroadcaster))
       .catch(function (err) {
         log.warn('error broadcasting routes: ' + err.message)
@@ -136,7 +164,6 @@ MessageRouter.prototype.getQuote = function (quoteQuery) {
 
 MessageRouter.prototype._getQuote = function * (quoteQuery) {
   validateAmounts(quoteQuery.source_amount, quoteQuery.destination_amount)
-  validatePrecisionAndScale(quoteQuery.destination_precision, quoteQuery.destination_scale)
   if (!quoteQuery.source_address) {
     // TODO use a different error message
     throw new InvalidBodyError('Missing required parameter: source_address')
@@ -165,12 +192,6 @@ function validateAmounts (sourceAmount, destinationAmount) {
       throw new InvalidAmountSpecifiedError('destination_amount must be finite and positive')
     }
   }
-}
-
-function validatePrecisionAndScale (precision, scale) {
-  if (precision && scale) return
-  if (!precision && !scale) return
-  throw new InvalidBodyError('Either both or neither of "precision" and "scale" must be specified')
 }
 
 module.exports = MessageRouter

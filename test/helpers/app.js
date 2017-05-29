@@ -25,12 +25,6 @@ exports.create = function (context) {
 
   const config = loadConfig()
   const tradingPairs = new TradingPairs(config.get('tradingPairs'))
-  const Backend = require('../../src/backends/' + config.get('backend'))
-  const backend = new Backend({
-    currencyWithLedgerPairs: tradingPairs,
-    backendUri: config.get('backendUri'),
-    spread: config.get('fxSpread')
-  })
   const routingTables = new RoutingTables({
     backend: config.backend,
     expiryDuration: config.routeExpiry,
@@ -38,6 +32,14 @@ exports.create = function (context) {
     fxSpread: config.fxSpread
   })
   const ledgers = new Ledgers({config, log, routingTables})
+  const Backend = require('../../src/backends/' + config.get('backend'))
+  const backend = new Backend({
+    currencyWithLedgerPairs: tradingPairs,
+    backendUri: config.get('backendUri'),
+    spread: config.get('fxSpread'),
+    getInfo: (ledger) => ledgers.getPlugin(ledger).getInfo(),
+    getBalance: (ledger) => ledgers.getPlugin(ledger).getBalance()
+  })
   ledgers.addFromCredentialsConfig(config.get('ledgerCredentials'))
   ledgers.setPairs(config.get('tradingPairs'))
   const routeBuilder = new RouteBuilder(
@@ -52,6 +54,7 @@ exports.create = function (context) {
     minMessageWindow: config.expiry.minMessageWindow,
     routeCleanupInterval: config.routeCleanupInterval,
     routeBroadcastInterval: config.routeBroadcastInterval,
+    routeExpiry: config.routeExpiry,
     autoloadPeers: true,
     peers: [],
     ledgerCredentials: config.ledgerCredentials,

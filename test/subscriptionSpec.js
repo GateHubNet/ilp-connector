@@ -2,6 +2,7 @@
 
 const _ = require('lodash')
 const nock = require('nock')
+const packet = require('ilp-packet')
 nock.enableNetConnect(['localhost'])
 const ratesResponse = require('./data/fxRates.json')
 const appHelper = require('./helpers/app')
@@ -10,6 +11,10 @@ const logHelper = require('./helpers/log')
 const wsHelper = require('./helpers/ws')
 const subscriptions = require('../src/models/subscriptions')
 const sinon = require('sinon')
+
+const mockPlugin = require('./mocks/mockPlugin')
+const mock = require('mock-require')
+mock('ilp-plugin-mock', mockPlugin)
 
 const START_DATE = 1434412800000 // June 16, 2015 00:00:00 GMT
 
@@ -26,14 +31,14 @@ describe('Subscriptions', function () {
 
     nock('http://usd-ledger.example').get('/')
       .reply(200, {
-        precision: 10,
-        scale: 4
+        currency_code: 'doesn\'t matter, the connector will ignore this',
+        currency_scale: 4
       })
 
     nock('http://eur-ledger.example').get('/')
       .reply(200, {
-        precision: 10,
-        scale: 4
+        currency_code: 'doesn\'t matter, the connector will ignore this',
+        currency_scale: 4
       })
 
     nock('http://usd-ledger.example').get('/accounts/mark')
@@ -108,12 +113,10 @@ describe('Subscriptions', function () {
         amount: sourceTransfer.debits[0].amount,
         executionCondition: sourceTransfer.debits[0].execution_condition,
         expiresAt: sourceTransfer.debits[0].expires_at,
-        data: {
-          ilp_header: {
-            amount: destinationTransfer.credits[0].amount,
-            account: destinationTransfer.credits[0].account
-          }
-        }
+        ilp: packet.serializeIlpPayment({
+          amount: destinationTransfer.credits[0].amount,
+          account: destinationTransfer.credits[0].account
+        }).toString('base64')
       })
 
     sinon.assert.calledOnce(sendSpy)
@@ -132,10 +135,10 @@ describe('Subscriptions', function () {
           source_transfer_id: sourceId,
           source_transfer_amount: sourceTransfer.debits[0].amount
         }
-      }, 'cf:0:')
+      }, 'HS8e5Ew02XKAglyus2dh2Ohabuqmy3HDM8EXMLz22ok')
 
     sinon.assert.calledOnce(fulfillSpy)
-    sinon.assert.calledWith(fulfillSpy, sourceId, 'cf:0:')
+    sinon.assert.calledWith(fulfillSpy, sourceId, 'HS8e5Ew02XKAglyus2dh2Ohabuqmy3HDM8EXMLz22ok')
   })
 
   it('should notify the backend of a successful payment', function * () {
@@ -157,7 +160,7 @@ describe('Subscriptions', function () {
           source_transfer_id: sourceId,
           source_transfer_amount: sourceTransfer.debits[0].amount
         }
-      }, 'cf:0:')
+      }, 'HS8e5Ew02XKAglyus2dh2Ohabuqmy3HDM8EXMLz22ok')
 
     sinon.assert.calledOnce(backendSpy)
     sinon.assert.calledWith(backendSpy, {

@@ -49,16 +49,16 @@ class MockPlugin extends EventEmitter {
 
   * _handleNotification () { }
 
-  * getBalance () {
-    return '123.456'
+  getBalance () {
+    return Promise.resolve('123.456')
   }
 
   getInfo () {
     return {
       prefix: this._prefix,
       connectors: ['mark'],
-      precision: 10,
-      scale: 4
+      currencyCode: 'doesn\'t matter, the connector will ignore this',
+      currencyScale: 4
     }
   }
 }

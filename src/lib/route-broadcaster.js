@@ -1,10 +1,12 @@
 'use strict'
 
+const _ = require('lodash')
 const co = require('co')
 const defer = require('co-defer')
 const Route = require('ilp-routing').Route
 const log = require('../common').log.create('route-broadcaster')
 const SIMPLIFY_POINTS = 10
+const PEER_LEDGER_PREFIX = 'peer.'
 
 class RouteBroadcaster {
   /**
@@ -35,7 +37,20 @@ class RouteBroadcaster {
 
     this.autoloadPeers = config.autoloadPeers
     this.defaultPeers = config.peers
-    this.peersByLedger = {} // { ledgerPrefix ⇒ { connectorAddress ⇒ true } }
+    // peersByLedger is stored in the form { ledgerPrefix ⇒ { connectorAddress ⇒ true } }
+    // Note that the connectorAddress must be the full ILP address, including the ledgerPrefix
+    this.peersByLedger = {}
+
+    this.peerEpochs = {} // { adjacentConnector ⇒ int } the last broadcast-epoch we successfully informed a peer in
+    this.holdDownTime = config.routeExpiry // todo? replace 'expiry' w/ hold-down or just reappropriate the term?
+    if (!this.holdDownTime) {
+      throw new Error('no holdDownTime')
+    }
+    if (this.routeBroadcastInterval >= this.holdDownTime) {
+      throw new Error('holdDownTime must be greater than routeBroadcastInterval or routes will expire between broadcasts!')
+    }
+    this.detectedDown = new Set()
+    this.lastNewRouteSentAt = Date.now()
   }
 
   * start () {
@@ -53,38 +68,86 @@ class RouteBroadcaster {
         throw e
       }
     }
-    setInterval(() => this.routingTables.removeExpiredRoutes(), this.routeCleanupInterval)
-    defer.setInterval(function * () {
-      yield this.reloadLocalRoutes()
-      this.broadcast()
+    this.removeExpiredRoutesSoon()
+    this.broadcastSoon()
+  }
+
+  removeExpiredRoutesSoon () {
+    setTimeout(() => {
+      try {
+        let lostLedgerLinks = this.routingTables.removeExpiredRoutes()
+        this.markLedgersUnreachable(lostLedgerLinks)
+      } catch (err) {
+        log.warn('removing expired routes failed')
+        log.debug(err)
+      }
+    }, this.routeCleanupInterval)
+  }
+
+  markLedgersUnreachable (lostLedgerLinks) {
+    if (lostLedgerLinks.length > 0) log.info('detected lostLedgerLinks:', lostLedgerLinks)
+    lostLedgerLinks.forEach((unreachableLedger) => { this.detectedDown.add(unreachableLedger) })
+  }
+  _currentEpoch () {
+    return this.routingTables.publicTables.currentEpoch
+  }
+
+  broadcastSoon () {
+    defer.setTimeout(function * () {
+      try {
+        this.routingTables.removeExpiredRoutes()
+        yield this.reloadLocalRoutes()
+        yield this.broadcast()
+      } catch (err) {
+        log.warn('broadcasting routes failed')
+        log.debug(err)
+      }
+      this.broadcastSoon()
     }.bind(this), this.routeBroadcastInterval)
   }
 
   broadcast () {
     const adjacentLedgers = Object.keys(this.peersByLedger)
-    const routes = this.routingTables.toJSON(SIMPLIFY_POINTS)
-    for (let adjacentLedger of adjacentLedgers) {
-      const ledgerRoutes = routes.filter((route) => route.source_ledger === adjacentLedger)
-      try {
-        this._broadcastToLedger(adjacentLedger, ledgerRoutes)
-      } catch (err) {
-        log.warn('broadcasting routes on ledger ' + adjacentLedger + ' failed')
-        log.debug(err)
-      }
+    const routes = this.routingTables.toJSON(SIMPLIFY_POINTS).filter(route => {
+      const isPeerRoute = (route.destination_ledger.startsWith(PEER_LEDGER_PREFIX))
+      return !isPeerRoute
+    })
+    log.debug('broadcasting to %d adjacent ledgers', adjacentLedgers.length)
+    const unreachableLedgers = Array.from(this.detectedDown)
+    this.detectedDown.clear()
+    if (unreachableLedgers.length > 0) {
+      log.info('broadcast unreachableLedgers:', unreachableLedgers)
     }
+
+    return Promise.all(adjacentLedgers.map((adjacentLedger) => {
+      const ledgerRoutes = routes.filter((route) => route.source_ledger === adjacentLedger)
+      return this._broadcastToLedger(adjacentLedger, ledgerRoutes, unreachableLedgers)
+        .catch((err) => {
+          log.warn('broadcasting routes on ledger ' + adjacentLedger + ' failed')
+          log.debug(err)
+        })
+    }))
   }
 
-  _broadcastToLedger (adjacentLedger, routes) {
+  _broadcastToLedger (adjacentLedger, routes, unreachableLedgers) {
     const connectors = Object.keys(this.peersByLedger[adjacentLedger])
-    for (const account of connectors) {
+    return Promise.all(connectors.map((account) => {
       log.info('broadcasting ' + routes.length + ' routes to ' + account)
+      let routesNewToConnector = routes.filter((route) => (route.added_during_epoch > (this.peerEpochs[account] || -1)))
+      const newRoutes = routesNewToConnector.map((route) => _.omit(route, ['added_during_epoch']))
+      if (unreachableLedgers.length > 0) log.info('_broadcastToLedger unreachableLedgers:', unreachableLedgers)
 
       const broadcastPromise = this.ledgers.getPlugin(adjacentLedger).sendMessage({
         ledger: adjacentLedger,
-        account: account,
+        from: this.ledgers.getPlugin(adjacentLedger).getAccount(),
+        to: account,
         data: {
           method: 'broadcast_routes',
-          data: routes
+          data: {
+            new_routes: newRoutes,
+            hold_down_time: this.holdDownTime,
+            unreachable_through_me: unreachableLedgers
+          }
         }
       })
       // timeout the plugin.sendMessage Promise just so we don't have it hanging around forever
@@ -96,12 +159,20 @@ class RouteBroadcaster {
       // we do not want to wait for the routes to be broadcasted before continuing.
       // Even if there is an error sending a specific route or a sendMessage promise hangs,
       // we should continue sending the other broadcasts out
-      Promise.race([broadcastPromise, timeoutPromise])
+      return Promise.race([broadcastPromise, timeoutPromise])
+        .then((val) => {
+          this.peerEpochs[account] = this._currentEpoch()
+        })
         .catch((err) => {
+          let lostLedgerLinks = this.routingTables.invalidateConnector(account)
+          log.info('detectedDown! account:', account, 'lostLedgerLinks:', lostLedgerLinks)
+          this.markLedgersUnreachable(lostLedgerLinks)
+          // todo: it would be better for the possibly-just-netsplit connector to report its last seen version of this connector's ledger
+          this.peerEpochs[account] = -1
           log.warn('broadcasting routes to ' + account + ' failed')
           log.debug(err)
         })
-    }
+    }))
   }
 
   crawl () {
@@ -113,6 +184,10 @@ class RouteBroadcaster {
   }
 
   * _crawlLedgerPlugin (plugin) {
+    if (!plugin.isConnected()) {
+      plugin.once('connect', () => this._crawlLedgerPlugin(plugin))
+      return
+    }
     const localAccount = plugin.getAccount()
     const info = plugin.getInfo()
     const prefix = info.prefix
@@ -120,11 +195,29 @@ class RouteBroadcaster {
       // Don't broadcast routes to ourselves.
       if (localAccount === connector) continue
       if (this.autoloadPeers || this.defaultPeers.indexOf(connector) !== -1) {
-        this.peersByLedger[prefix] = this.peersByLedger[prefix] || {}
-        this.peersByLedger[prefix][connector] = true
-        log.info('adding peer ' + connector + ' via ledger ' + prefix)
+        this._addPeer(prefix, connector)
       }
     }
+
+    // Add peers from config if their prefixes match the ledger,
+    // even if they are not returned in the ledger info
+    for (const connector of this.defaultPeers) {
+      if (connector.indexOf(prefix) === 0) {
+        this._addPeer(prefix, connector)
+      }
+    }
+  }
+
+  _addPeer (prefix, connector) {
+    if (!this.peersByLedger[prefix]) {
+      this.peersByLedger[prefix] = {}
+    }
+    if (this.peersByLedger[prefix][connector]) {
+      // don't log duplicates
+      return
+    }
+    this.peersByLedger[prefix][connector] = true
+    log.info('adding peer ' + connector + ' via ledger ' + prefix)
   }
 
   depeerLedger (prefix) {
@@ -138,7 +231,10 @@ class RouteBroadcaster {
 
   _getLocalRoutes () {
     return Promise.all(this.ledgers.getPairs().map(
-      (pair) => co.wrap(this._tradingPairToLocalRoute).call(this, pair)))
+      (pair) => co.wrap(this._tradingPairToLocalRoute).call(this, pair)
+    )).then(
+      (localRoutes) => localRoutes.filter((route) => !!route)
+    )
   }
 
   addConfigRoutes () {
@@ -149,16 +245,18 @@ class RouteBroadcaster {
 
       const route = new Route(
         // use a 1:1 curve as a placeholder (it will be overwritten by a remote quote)
-        [ [0, 0], [1, 1] ],
-        // the second ledger is inserted to make sure this the hop to the
+        [ [0, 0], [Number.MAX_VALUE, Number.MAX_VALUE] ],
+        // the nextLedger is inserted to make sure this the hop to the
         // connectorLedger is not considered final.
-        [ connectorLedger, targetPrefix ],
-        { minMessageWindow: this.minMessageWindow,
+        {
+          sourceLedger: connectorLedger,
+          nextLedger: targetPrefix,
+          minMessageWindow: this.minMessageWindow,
           sourceAccount: connector,
-          targetPrefix: targetPrefix }
-      )
+          targetPrefix: targetPrefix })
 
-      this.routingTables.addRoute(route)
+      // set the noExpire option to true when adding config routes
+      this.routingTables.addRoute(route, true)
     }
 
     // returns a promise in order to be similar to reloadLocalRoutes()
@@ -170,15 +268,17 @@ class RouteBroadcaster {
     const destinationLedger = pair[1].split('@').slice(1).join('@')
     const sourceCurrency = pair[0].split('@')[0]
     const destinationCurrency = pair[1].split('@')[0]
+    const sourcePlugin = this.ledgers.getPlugin(sourceLedger)
+    const destinationPlugin = this.ledgers.getPlugin(destinationLedger)
+    // `backend.getCurve()` may need `plugin.getInfo()`
+    if (!sourcePlugin.isConnected() || !destinationPlugin.isConnected()) return
+
     const curve = yield this.backend.getCurve({
       source_ledger: sourceLedger,
       destination_ledger: destinationLedger,
       source_currency: sourceCurrency,
       destination_currency: destinationCurrency
     })
-    const sourcePlugin = this.ledgers.getPlugin(sourceLedger)
-    const destinationPlugin = this.ledgers.getPlugin(destinationLedger)
-    const destinationInfo = destinationPlugin.getInfo()
     return Route.fromData({
       source_ledger: sourceLedger,
       destination_ledger: destinationLedger,
@@ -186,10 +286,8 @@ class RouteBroadcaster {
       min_message_window: this.minMessageWindow,
       source_account: sourcePlugin.getAccount(),
       destination_account: destinationPlugin.getAccount(),
-      points: curve.points,
-      destinationPrecision: destinationInfo.precision,
-      destinationScale: destinationInfo.scale
-    })
+      points: curve.points
+    }, this._currentEpoch())
   }
 }
 

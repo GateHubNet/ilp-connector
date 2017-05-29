@@ -29,11 +29,25 @@ function listen (config, ledgers, backend, routeBuilder, routeBroadcaster, messa
       process.exit(1)
     }
     yield subscriptions.subscribePairs(ledgers.getCore(), config, routeBuilder, messageRouter, backend)
-    yield ledgers.connect({timeout: Infinity})
+
+    let allLedgersConnected
+    try {
+      yield ledgers.connect({timeout: 10000})
+      allLedgersConnected = true
+    } catch (err) {
+      allLedgersConnected = false
+      log.warn('one or more ledgers failed to connect; broadcasting routes anyway; error=', err.message)
+    }
+
     if (config.routeBroadcastEnabled) {
       yield routeBroadcaster.start()
     } else {
       yield routeBroadcaster.addConfigRoutes()
+      yield routeBroadcaster.reloadLocalRoutes()
+    }
+
+    if (!allLedgersConnected) {
+      yield ledgers.connect({timeout: Infinity})
       yield routeBroadcaster.reloadLocalRoutes()
     }
     log.info('connector ready (republic attitude)')
@@ -90,7 +104,8 @@ function createApp (config, ledgers, backend, routeBuilder, routeBroadcaster, ro
       currencyWithLedgerPairs: ledgers.getPairs(),
       backendUri: config.get('backendUri'),
       spread: config.get('fxSpread'),
-      getInfo: (ledger) => ledgers.getPlugin(ledger)
+      getInfo: (ledger) => ledgers.getPlugin(ledger),
+      getBalance: (ledger) => ledgers.getPlugin(ledger).getBalance()
     })
   }
 
@@ -115,6 +130,7 @@ function createApp (config, ledgers, backend, routeBuilder, routeBroadcaster, ro
         minMessageWindow: config.expiry.minMessageWindow,
         routeCleanupInterval: config.routeCleanupInterval,
         routeBroadcastInterval: config.routeBroadcastInterval,
+        routeExpiry: config.routeExpiry,
         autoloadPeers: config.autoloadPeers,
         peers: config.peers,
         ledgerCredentials: config.ledgerCredentials

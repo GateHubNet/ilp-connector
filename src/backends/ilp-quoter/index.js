@@ -1,6 +1,7 @@
 'use strict'
 
 const _ = require('lodash')
+const BigNumber = require('bignumber.js')
 const request = require('co-request')
 const UnsupportedPairError =
   require('../../errors/unsupported-pair-error')
@@ -17,7 +18,10 @@ const PROBE_SOURCE_AMOUNT = 100000000
  *   the source and destination amounts
  * The ILP quoter doesn't do any arithmetic -- it's up to the external
  *   component to compute the correct amounts with the required
- *   precision. So amounts are passed using JSON strings
+ *   precision. So amounts are passed using JSON strings.
+ * Quote precision is a constructor option of this Backend.
+ * Currency codes are specified in construction option currencyWithLedgerPairs
+ * Currency scale is specified by the ledger plugin for each legder.
  */
 class ILPQuoter {
   constructor (opts) {
@@ -30,6 +34,7 @@ class ILPQuoter {
     this.backendUri = opts.backendUri
     this.backendStatus = healthStatus.statusNotOk
     this.getInfo = opts.getInfo
+    this.quotePrecision = opts.quotePrecision
   }
 
   * putPair (uri) {
@@ -88,23 +93,35 @@ class ILPQuoter {
                                                params.destination_ledger)
     const amount = PROBE_SOURCE_AMOUNT
     const type = 'source'
-    const ledger = params.destination_ledger
 
     const uri = this.backendUri + '/quote/' +
                 currencyPair[0] + '/' + currencyPair[1] + '/' + amount +
                 '/' + type
 
-    const ledgerInfo = this.getInfo(ledger)
-    const precision = ledgerInfo.precision
-    const scale = ledgerInfo.scale
+    const sourceScale = this.getInfo(params.source_ledger).currencyScale
+    const destinationInfo = this.getInfo(params.destination_ledger)
+    const destinationScale = destinationInfo.currencyScale
 
-    const result = yield request({uri, json: true, qs: {precision, scale}})
+    const result = yield request({
+      uri,
+      json: true,
+      qs: {
+        precision: this.quotePrecision,
+        scale: destinationScale
+      }
+    })
     if (result.statusCode >= 400) {
       log.error('Error getting quote: ', JSON.stringify(result.body))
       throw new ServerError('Unable to get quote from backend.')
     }
     return {
-      points: [ [0, 0], [result.body.source_amount, result.body.destination_amount] ],
+      points: [
+        [0, 0],
+        [
+          new BigNumber(result.body.source_amount).shift(sourceScale).toNumber(),
+          new BigNumber(result.body.destination_amount).shift(destinationScale).toNumber()
+        ]
+      ],
       additional_info: result.body.additional_info
     }
   }

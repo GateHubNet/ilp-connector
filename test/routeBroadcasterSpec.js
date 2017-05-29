@@ -8,6 +8,7 @@ const assert = require('assert')
 const routing = require('ilp-routing')
 const RoutingTables = require('../src/lib/routing-tables')
 const RouteBroadcaster = require('../src/lib/route-broadcaster')
+const MessageRouter = require('../src/lib/message-router')
 const Ledgers = require('../src/lib/ledgers')
 const log = require('../src/common').log
 const appHelper = require('./helpers/app')
@@ -53,9 +54,12 @@ describe('RouteBroadcaster', function () {
       log
     })
     this.ledgers.addFromCredentialsConfig(ledgerCredentials)
-    this.ledgers.getPlugin(ledgerA).getInfo =
-    this.ledgers.getPlugin(ledgerB).getInfo =
-      function () { return {precision: 10, scale: 2} }
+    this.ledgers.getPlugin(ledgerA).getInfo = this.ledgers.getPlugin(ledgerB).getInfo = function () {
+      return {
+        currencyCode: 'doesn\'t matter, the connector will ignore this',
+        currencyScale: 2
+      }
+    }
 
     this.tables.addLocalRoutes(this.ledgers, [{
       source_ledger: ledgerA,
@@ -64,9 +68,7 @@ describe('RouteBroadcaster', function () {
       source_account: ledgerA + 'mark',
       destination_account: ledgerB + 'mark',
       points: [ [0, 0], [200, 100] ],
-      additional_info: {},
-      destination_precision: 10,
-      destination_scale: 2
+      additional_info: {}
     }, {
       source_ledger: ledgerB,
       destination_ledger: ledgerA,
@@ -74,12 +76,10 @@ describe('RouteBroadcaster', function () {
       source_account: ledgerB + 'mark',
       destination_account: ledgerA + 'mark',
       points: [ [0, 0], [100, 200] ],
-      additional_info: {},
-      destination_precision: 10,
-      destination_scale: 2
+      additional_info: {}
     }])
 
-    this.broadcaster = new RouteBroadcaster(this.tables, this.backend, this.ledgers, {
+    this.config = {
       tradingPairs: [
         [ledgerA, ledgerB],
         [ledgerB, ledgerA]
@@ -88,8 +88,11 @@ describe('RouteBroadcaster', function () {
       autoloadPeers: true,
       peers: [],
       ledgerCredentials,
-      configRoutes
-    })
+      configRoutes,
+      routeExpiry: 1234
+    }
+
+    this.broadcaster = new RouteBroadcaster(this.tables, this.backend, this.ledgers, this.config)
 
     this.tables.addRoute({
       source_ledger: ledgerB,
@@ -97,14 +100,31 @@ describe('RouteBroadcaster', function () {
       source_account: ledgerB + 'mary',
       min_message_window: 1,
       points: [ [0, 0], [50, 60] ],
-      additional_info: {},
-      destination_precision: 10,
-      destination_scale: 2
+      additional_info: {}
     })
+
+    this.tables.addRoute({
+      source_ledger: ledgerB,
+      destination_ledger: 'peer.dont.broadcast.me.', // ledgers that start with `peer.` should not be broadcast
+      source_account: ledgerB + 'mary',
+      min_message_window: 1,
+      points: [ [0, 0], [50, 60] ],
+      additional_info: {}
+    })
+    yield this.ledgers.connect()
   })
 
   afterEach(function () {
     delete process.env.BACKEND
+  })
+
+  describe('crawl', function () {
+    it('loads peers from CONNECTOR_PEERS even if they are not returned in the ledger info', function * () {
+      this.config.peers.push('eur-ledger.margery')
+      this.broadcaster = new RouteBroadcaster(this.tables, this.backend, this.ledgers, this.config)
+      yield this.broadcaster.crawl()
+      assert(this.broadcaster.peersByLedger['eur-ledger.']['eur-ledger.margery'])
+    })
   })
 
   describe('addConfigRoutes', function () {
@@ -121,34 +141,31 @@ describe('RouteBroadcaster', function () {
   })
 
   describe('broadcast', function () {
-    const routesFromA = [
+    const routesWithSourceLedgerA = [
       {
         source_ledger: ledgerA,
         destination_ledger: ledgerB,
         min_message_window: 1,
         source_account: ledgerA + 'mark',
-        points: [ [0, -0.01], [200, 99.99] ],
-        destination_precision: 10,
-        destination_scale: 2
+        points: [ [0.02, 0], [200, 99.99] ],
+        paths: [ [] ]
       }, {
         source_ledger: ledgerA,
         destination_ledger: ledgerC,
         min_message_window: 2,
         source_account: ledgerA + 'mark',
-        points: [ [0, 0], [0.02, 0], [100.02, 60], [200, 60] ],
-        destination_precision: 10,
-        destination_scale: 2
+        points: [ [0.02, 0], [100.02, 60] ],
+        paths: [ [] ]
       }
     ]
-    const routesFromB = [
+    const routesWithSourceLedgerB = [
       {
         source_ledger: ledgerB,
         destination_ledger: ledgerA,
         min_message_window: 1,
         source_account: ledgerB + 'mark',
-        points: [ [0, -0.01], [100, 199.99] ],
-        destination_precision: 10,
-        destination_scale: 2
+        points: [ [0.005, 0], [100, 199.99] ],
+        paths: [ [] ]
       }
     ]
 
@@ -181,31 +198,122 @@ describe('RouteBroadcaster', function () {
           }
         }
 
-      let routesFromASent, routesFromBSent
+      let routesWithSourceLedgerASent, routesWithSourceLedgerBSent
       this.ledgers.getPlugin(ledgerA).sendMessage = function (message) {
         assert.deepEqual(message, {
           ledger: ledgerA,
-          account: ledgerA + 'mary',
-          data: { method: 'broadcast_routes', data: routesFromA }
+          from: ledgerA + 'mark',
+          to: ledgerA + 'mary',
+          data:
+          { method: 'broadcast_routes',
+            data:
+            { hold_down_time: 1234,
+              unreachable_through_me: [],
+              new_routes: routesWithSourceLedgerA } }
         })
-        routesFromASent = true
+        routesWithSourceLedgerASent = true
         return Promise.resolve(null)
       }
 
       this.ledgers.getPlugin(ledgerB).sendMessage = function (message) {
         assert.deepEqual(message, {
           ledger: ledgerB,
-          account: ledgerB + 'mary',
-          data: { method: 'broadcast_routes', data: routesFromB }
+          from: ledgerB + 'mark',
+          to: ledgerB + 'mary',
+          data:
+          { method: 'broadcast_routes',
+            data:
+            { hold_down_time: 1234,
+              unreachable_through_me: [],
+              new_routes: routesWithSourceLedgerB } }
         })
-        routesFromBSent = true
+        routesWithSourceLedgerBSent = true
         return Promise.resolve(null)
       }
 
       yield this.broadcaster.crawl()
       this.broadcaster.broadcast()
-      assert(routesFromASent)
-      assert(routesFromBSent)
+      assert(routesWithSourceLedgerASent)
+      assert(routesWithSourceLedgerBSent)
+    })
+
+    it('invalidates routes', function * () {
+      const config = this.config
+      const ledgers = this.ledgers
+      const routingTables = this.tables
+      const routeBroadcaster = this.routeBroadcaster
+      const routeBuilder = this.routeBuilder
+      const balanceCache = this.balanceCache
+      const messageRouter = new MessageRouter({config, ledgers, routingTables, routeBroadcaster, routeBuilder, balanceCache})
+      const ledgerD = 'xrp.ledger.'
+      const newRoutes = [{
+        source_ledger: ledgerB,
+        destination_ledger: ledgerD,
+        source_account: ledgerB + 'mark',
+        min_message_window: 1,
+        points: [ [0, 0], [50, 60] ]
+      }]
+      assert.equal(this.tables.toJSON(2).length, 4)
+      yield messageRouter.receiveRoutes({
+        new_routes: newRoutes,
+        hold_down_time: 1234,
+        unreachable_through_me: []
+      }, ledgerB + 'mark')
+      assert.equal(this.tables.toJSON(2).length, 5)
+      yield messageRouter.receiveRoutes({
+        new_routes: [],
+        hold_down_time: 1234,
+        unreachable_through_me: [ledgerD]
+      }, ledgerB + 'mark')
+      assert.equal(this.tables.toJSON(2).length, 4)
+    })
+
+    it('does not add peer routes', function * () {
+      const config = this.config
+      const ledgers = this.ledgers
+      const routingTables = this.tables
+      const routeBroadcaster = this.routeBroadcaster
+      const routeBuilder = this.routeBuilder
+      const balanceCache = this.balanceCache
+      const messageRouter = new MessageRouter({config, ledgers, routingTables, routeBroadcaster, routeBuilder, balanceCache})
+      const newRoutes = [{
+        source_ledger: ledgerB,
+        destination_ledger: 'peer.do.not.add.me',
+        source_account: ledgerB + 'mark',
+        min_message_window: 1,
+        points: [ [0, 0], [50, 60] ]
+      }]
+      assert.equal(this.tables.toJSON(2).length, 4)
+      yield messageRouter.receiveRoutes({
+        new_routes: newRoutes,
+        hold_down_time: 1234,
+        unreachable_through_me: []
+      }, ledgerB + 'mark')
+      assert.equal(this.tables.toJSON(2).length, 4)
+    })
+
+    it('ignores routes where source_ledger does not match source_account', function * () {
+      const config = this.config
+      const ledgers = this.ledgers
+      const routingTables = this.tables
+      const routeBroadcaster = this.routeBroadcaster
+      const routeBuilder = this.routeBuilder
+      const balanceCache = this.balanceCache
+      const messageRouter = new MessageRouter({config, ledgers, routingTables, routeBroadcaster, routeBuilder, balanceCache})
+      const newRoutes = [{
+        source_ledger: ledgerA,
+        destination_ledger: ledgerC,
+        source_account: ledgerB + 'mark',
+        min_message_window: 1,
+        points: [ [0, 0], [50, 60] ]
+      }]
+      assert.equal(this.tables.toJSON(2).length, 4)
+      yield messageRouter.receiveRoutes({
+        new_routes: newRoutes,
+        hold_down_time: 1234,
+        unreachable_through_me: []
+      }, ledgerB + 'mark')
+      assert.equal(this.tables.toJSON(2).length, 4)
     })
 
     it('should send all routes even if sending one message fails', function * () {
@@ -222,20 +330,20 @@ describe('RouteBroadcaster', function () {
           return { prefix: ledgerC, connectors: [ledgerC + 'mark'] }
         }
 
-      let routesFromASent, routesFromBSent
+      let routesWithSourceLedgerASent, routesWithSourceLedgerBSent
       this.ledgers.getPlugin(ledgerA).sendMessage = function (message) {
-        routesFromASent = true
+        routesWithSourceLedgerASent = true
         return Promise.reject(new Error('something went wrong but the connector should continue anyway'))
       }
       this.ledgers.getPlugin(ledgerB).sendMessage = function (message) {
-        routesFromBSent = true
+        routesWithSourceLedgerBSent = true
         return Promise.resolve(null)
       }
 
       yield this.broadcaster.crawl()
       this.broadcaster.broadcast()
-      assert(routesFromASent)
-      assert(routesFromBSent)
+      assert(routesWithSourceLedgerASent)
+      assert(routesWithSourceLedgerBSent)
     })
 
     it('should send all routes even if plugin.sendMessage hangs', function * () {
@@ -252,22 +360,22 @@ describe('RouteBroadcaster', function () {
           return { prefix: ledgerC, connectors: [ledgerC + 'mark'] }
         }
 
-      let routesFromASent, routesFromBSent
+      let routesWithSourceLedgerASent, routesWithSourceLedgerBSent
       this.ledgers.getPlugin(ledgerA).sendMessage = function (message) {
-        routesFromASent = true
+        routesWithSourceLedgerASent = true
         return new Promise((resolve) => {
           setTimeout(resolve, 1000000)
         })
       }
       this.ledgers.getPlugin(ledgerB).sendMessage = function (message) {
-        routesFromBSent = true
+        routesWithSourceLedgerBSent = true
         return Promise.resolve(null)
       }
 
       yield this.broadcaster.crawl()
       this.broadcaster.broadcast()
-      assert(routesFromASent)
-      assert(routesFromBSent)
+      assert(routesWithSourceLedgerASent)
+      assert(routesWithSourceLedgerBSent)
     })
   })
 
@@ -276,12 +384,12 @@ describe('RouteBroadcaster', function () {
       const route = yield this.broadcaster._tradingPairToLocalRoute(
         [ 'CAD@' + ledgerA, 'USD@' + ledgerB ])
       assert.ok(route instanceof routing.Route)
-      assert.deepEqual(route.hops, [ledgerA, ledgerB])
       assert.deepEqual(route.sourceLedger, ledgerA)
+      assert.deepEqual(route.nextLedger, ledgerB)
       assert.deepEqual(route.destinationLedger, ledgerB)
       assert.deepEqual(route.sourceAccount, ledgerA + 'mark')
       assert.deepEqual(route.destinationAccount, ledgerB + 'mark')
-      assert.deepEqual(route.getPoints(), [ [0, 0], [100000000, 77823868.07038209] ])
+      assert.deepEqual(route.getPoints(), [ [0, 0], [1000000000000, 778238680703.8209] ])
     })
   })
 })

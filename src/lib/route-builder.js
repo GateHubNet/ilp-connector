@@ -1,12 +1,15 @@
 'use strict'
 const _ = require('lodash')
 const BigNumber = require('bignumber.js')
-const AssetsNotTradedError = require('../errors/assets-not-traded-error')
+const packet = require('ilp-packet')
+const routing = require('ilp-routing')
+const NoRouteFoundError = require('../errors/no-route-found-error')
 const UnacceptableAmountError = require('../errors/unacceptable-amount-error')
-const UnacceptableRateError = require('../errors/unacceptable-rate-error')
 const LedgerNotConnectedError = require('../errors/ledger-not-connected-error')
+const IlpError = require('../errors/ilp-error')
 const getDeterministicUuid = require('../lib/utils').getDeterministicUuid
 const log = require('../common/log').create('route-builder')
+const startsWith = require('lodash/startsWith')
 
 class RouteBuilder {
   /**
@@ -36,17 +39,14 @@ class RouteBuilder {
    * @param {String} params.destinationAddress
    * @param {String} [params.destinationAmount]
    * @param {Number} [params.destinationExpiryDuration]
-   * @param {Object} [params.destinationPrecisionAndScale]
    * @param {Object} [params.slippage]
    * @returns {Quote}
    */
   * getQuote (params) {
     log.info('creating quote sourceAddress=%s sourceAmount=%s ' +
-      'destinationAddress=%s destinationAmount=%s ' +
-      'destinationPrecisionAndScale=%s slippage=%s',
+      'destinationAddress=%s destinationAmount=%s slippage=%s',
       params.sourceAddress, params.sourceAmount,
-      params.destinationAddress, params.destinationAmount,
-      params.destinationPrecisionAndScale, params.slippage)
+      params.destinationAddress, params.destinationAmount, params.slippage)
     const info = {}
     const quote = yield this.ledgers.quote({
       sourceAddress: params.sourceAddress,
@@ -54,33 +54,37 @@ class RouteBuilder {
       destinationAddress: params.destinationAddress,
       destinationAmount: params.destinationAmount,
       sourceExpiryDuration: params.sourceExpiryDuration,
-      destinationExpiryDuration: params.destinationExpiryDuration,
-      destinationPrecisionAndScale: params.destinationPrecisionAndScale
+      destinationExpiryDuration: params.destinationExpiryDuration
     })
-    if (!quote) throwAssetsNotTradedError()
+    if (!quote) {
+      log.info('no quote found for params: ' + JSON.stringify(params))
+      log.debug('current routing tables (simplified to 10 points): ' + JSON.stringify(this.routingTables.toJSON(10)))
+      throw new NoRouteFoundError('No route found from: ' + params.sourceAddress + ' to: ' + params.destinationAddress)
+    }
     this._verifyLedgerIsConnected(quote.sourceLedger)
     this._verifyLedgerIsConnected(quote.nextLedger)
 
     const slippage = params.slippage ? +params.slippage : this.slippage
+    // "curve" may or may not be provided on the quote.
+    const curve = quote.liquidityCurve && new routing.LiquidityCurve(quote.liquidityCurve)
     if (params.sourceAmount) {
       const amount = new BigNumber(quote.destinationAmount)
       const amountWithSlippage = amount.times(1 - slippage)
       quote.destinationAmount = amountWithSlippage.toString()
       info.slippage = amount.minus(amountWithSlippage).toString()
+      quote.liquidityCurve = curve && curve.shiftY(-info.slippage).getPoints()
     } else { // fixed destinationAmount
       const amount = new BigNumber(quote.sourceAmount)
       const amountWithSlippage = amount.times(1 + slippage)
       quote.sourceAmount = amountWithSlippage.toString()
       info.slippage = amount.minus(amountWithSlippage).toString()
+      quote.liquidityCurve = curve && curve.shiftX(-info.slippage).getPoints()
     }
 
     // Round in favor of the connector (source amount up; destination amount down)
     // to ensure it doesn't lose any money. The amount is quoted using the unshifted rate.
-    const roundedSourceAmount = this._roundAmount(
-      'source', 'up', quote.sourceLedger, quote.sourceAmount)
-    const roundedDestinationAmount = this._roundAmount(
-      'destination', 'down', quote.destinationLedger, quote.destinationAmount,
-      params.destinationPrecisionAndScale || quote.destinationPrecisionAndScale)
+    const roundedSourceAmount = this._roundAmount('source', 'up', quote.sourceAmount)
+    const roundedDestinationAmount = this._roundAmount('destination', 'down', quote.destinationAmount)
 
     return _.omitBy(Object.assign(quote, {
       sourceAmount: roundedSourceAmount,
@@ -105,41 +109,77 @@ class RouteBuilder {
    */
   * getDestinationTransfer (sourceTransfer) {
     log.info('constructing destination transfer ' +
-      'sourceLedger=%s sourceAmount=%s ilpHeader=%s',
-      sourceTransfer.ledger, sourceTransfer.amount,
-      sourceTransfer.data && JSON.stringify(sourceTransfer.data.ilp_header))
-    const ilpHeader = sourceTransfer.data && sourceTransfer.data.ilp_header
-    if (!ilpHeader) {
-      throw new Error('source transfer is missing ilp_header in memo')
+      'sourceLedger=%s sourceAmount=%s ilpPacket=%s',
+      sourceTransfer.ledger, sourceTransfer.amount, sourceTransfer.ilp)
+    if (!sourceTransfer.ilp) {
+      throw new IlpError({
+        code: 'S01',
+        name: 'Invalid Packet',
+        message: 'source transfer is missing "ilp"'
+      })
     }
+    let ilpPacket
+    try {
+      ilpPacket = packet.deserializeIlpPayment(Buffer.from(sourceTransfer.ilp, 'base64'))
+    } catch (err) {
+      log.debug('error parsing ILP packet: ' + sourceTransfer.ilp)
+      throw new IlpError({
+        code: 'S01',
+        name: 'Invalid Packet',
+        message: 'source transfer has invalid ILP packet'
+      })
+    }
+    const destinationAddress = ilpPacket.account
+    const myAddress = this.ledgers.getPlugin(sourceTransfer.ledger).getAccount()
+    if (startsWith(destinationAddress, myAddress)) {
+      log.debug(
+        'ignoring transfer addressed to destination which starts with my address destination=%s me=%s',
+        destinationAddress,
+        myAddress
+      )
+      return
+    }
+
+    log.debug('constructing transfer for ILP packet with account=%s amount=%s',
+      ilpPacket.account, ilpPacket.amount)
 
     const sourceLedger = sourceTransfer.ledger
     // Use `findBestHopForSourceAmount` since the source amount includes the slippage.
     const nextHop = this.routingTables.findBestHopForSourceAmount(
-      sourceLedger, ilpHeader.account, sourceTransfer.amount)
-    if (!nextHop) throwAssetsNotTradedError()
+      sourceLedger, ilpPacket.account, sourceTransfer.amount)
+    if (!nextHop) {
+      log.info('could not find route for source transfer: ' + JSON.stringify(sourceTransfer))
+      log.debug('current routing tables (simplified to 10 points): ' + JSON.stringify(this.routingTables.toJSON(10)))
+      throw new IlpError({
+        code: 'S02',
+        name: 'Unreachable',
+        message: 'No route found from: ' + sourceLedger + ' to: ' + ilpPacket.account
+      })
+    }
     this._verifyLedgerIsConnected(nextHop.destinationLedger)
 
     // Round in favor of the connector. findBestHopForSourceAmount uses the
     // local (unshifted) routes to compute the amounts, so the connector rounds
     // in its own favor to ensure it won't lose money.
-    nextHop.destinationAmount = this._roundAmount('destination', 'down',
-      nextHop.destinationLedger, nextHop.destinationAmount)
+    nextHop.destinationAmount = this._roundAmount('destination', 'down', nextHop.destinationAmount)
 
     // Check if this connector can authorize the final transfer.
     if (nextHop.isFinal) {
-      const roundedFinalAmount = this._roundAmount('destination', 'down',
-        nextHop.finalLedger, nextHop.finalAmount)
-      // Verify ilpHeader.amount ≤ nextHop.finalAmount
-      const expectedFinalAmount = new BigNumber(ilpHeader.amount)
+      const roundedFinalAmount = this._roundAmount('destination', 'down', nextHop.finalAmount)
+      // Verify ilpPacket.amount ≤ nextHop.finalAmount
+      const expectedFinalAmount = new BigNumber(ilpPacket.amount)
       if (expectedFinalAmount.greaterThan(roundedFinalAmount)) {
-        throw new UnacceptableRateError('Payment rate does not match the rate currently offered')
+        throw new IlpError({
+          code: 'R02',
+          name: 'Insufficient Source Amount',
+          message: 'Payment rate does not match the rate currently offered'
+        })
       }
       // TODO: Verify atomic mode notaries are trusted
       // TODO: Verify expiry is acceptable
 
-      nextHop.destinationCreditAccount = ilpHeader.account
-      nextHop.destinationAmount = ilpHeader.amount
+      nextHop.destinationCreditAccount = ilpPacket.account
+      nextHop.destinationAmount = ilpPacket.amount
     }
 
     const noteToSelf = {
@@ -164,7 +204,7 @@ class RouteBuilder {
       direction: 'outgoing',
       account: nextHop.destinationCreditAccount,
       amount: nextHop.destinationAmount,
-      data: { ilp_header: ilpHeader },
+      ilp: sourceTransfer.ilp,
       noteToSelf,
       executionCondition: sourceTransfer.executionCondition,
       cancellationCondition: sourceTransfer.cancellationCondition,
@@ -186,27 +226,14 @@ class RouteBuilder {
    *
    * @param {String} sourceOrDestination "source" or "destination"
    * @param {String} upOrDown "up" or "down"
-   * @param {IlpAddress} ledger
    * @param {String} amount
-   * @param {Object} [_precisionAndScale]
    * @returns {String} rounded amount
    */
-  _roundAmount (sourceOrDestination, upOrDown, ledger, amount, _precisionAndScale) {
-    const plugin = this.ledgers.getPlugin(ledger)
-    if (!_precisionAndScale && !plugin) return amount
-    const precisionAndScale = _precisionAndScale || plugin.getInfo()
+  _roundAmount (sourceOrDestination, upOrDown, amount) {
     const roundingMode = upOrDown === 'down' ? BigNumber.ROUND_DOWN : BigNumber.ROUND_UP
-
     const bnAmount = new BigNumber(amount)
-    const requiredPrecisionRounding = bnAmount.precision() - precisionAndScale.precision
-    const requiredScaleRounding = bnAmount.decimalPlaces() - precisionAndScale.scale
-
-    const roundedAmount =
-      (requiredPrecisionRounding > requiredScaleRounding)
-      ? bnAmount.toPrecision(precisionAndScale.precision, roundingMode)
-      : bnAmount.toFixed(precisionAndScale.scale, roundingMode)
-
-    validateAmount(roundedAmount, ledger, sourceOrDestination)
+    const roundedAmount = bnAmount.toFixed(0, roundingMode)
+    validateAmount(roundedAmount, sourceOrDestination)
     return roundedAmount
   }
 
@@ -217,11 +244,7 @@ class RouteBuilder {
   }
 }
 
-function throwAssetsNotTradedError () {
-  throw new AssetsNotTradedError('This connector does not support the given asset pair')
-}
-
-function validateAmount (amount, ledger, sourceOrDestination) {
+function validateAmount (amount, sourceOrDestination) {
   const bnAmount = new BigNumber(amount)
   if (bnAmount.lte(0)) {
     throw new UnacceptableAmountError(

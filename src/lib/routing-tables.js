@@ -62,9 +62,9 @@ class RoutingTables {
     }
   }
 
-  addRoute (route) {
-    this.localTables.addRoute(route)
-    return this.publicTables.addRoute(route)
+  addRoute (route, noExpire) {
+    this.localTables.addRoute(route, noExpire)
+    return this.publicTables.addRoute(route, noExpire)
   }
 
   findBestHopForSourceAmount (sourceLedger, destinationLedger, sourceAmount) {
@@ -81,6 +81,10 @@ class RoutingTables {
     return this.publicTables.toJSON(maxPoints)
   }
 
+  toDebugStrings () {
+    return this.publicTables.toDebugStrings()
+  }
+
   removeLedger (ledger) {
     this.localTables.removeLedger(ledger)
     this.publicTables.removeLedger(ledger)
@@ -88,12 +92,28 @@ class RoutingTables {
 
   removeExpiredRoutes () {
     this.localTables.removeExpiredRoutes()
-    this.publicTables.removeExpiredRoutes()
+    let removedRoutes = this.publicTables.removeExpiredRoutes()
+    return removedRoutes
+  }
+
+  bumpConnector (connectorAccount, holdDownTime) {
+    this.localTables.bumpConnector(connectorAccount, holdDownTime)
+    this.publicTables.bumpConnector(connectorAccount, holdDownTime)
+  }
+
+  invalidateConnector (connectorAccount) {
+    this.localTables.invalidateConnector(connectorAccount)
+    return this.publicTables.invalidateConnector(connectorAccount)
+  }
+
+  invalidateConnectorsRoutesTo (connectorAccount, ledger) {
+    this.localTables.invalidateConnectorsRoutesTo(connectorAccount, ledger)
+    return this.publicTables.invalidateConnectorsRoutesTo(connectorAccount, ledger)
   }
 
   _getScaleAdjustment (ledgers, sourceLedger, destinationLedger) {
-    const sourceScale = ledgers.getPlugin(sourceLedger).getInfo().scale
-    const destinationScale = ledgers.getPlugin(destinationLedger).getInfo().scale
+    const sourceScale = ledgers.getPlugin(sourceLedger).getInfo().currencyScale
+    const destinationScale = ledgers.getPlugin(destinationLedger).getInfo().currencyScale
     if (sourceScale === destinationScale && this.isTrivialRate) return 0
     const destinationAdjustment = destinationScale ? Math.pow(10, -destinationScale) : 0
     return destinationAdjustment

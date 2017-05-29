@@ -140,7 +140,7 @@ Breaking down that command:
 
 ## Payments
 
-The connector will facilitate an interledger payment upon receiving a notification for a transfer in which it is credited. That "source" transfer must have a `ilp_header` in its credit's `memo` that specifies the payment's destination and amount.
+The connector will facilitate an interledger payment upon receiving a notification for a transfer in which it is credited. That "source" transfer must have an `IlpPayment` in its credit's `memo.ilp` that specifies the payment's destination and amount.
 As soon as the source transfer is prepared, the connector will authorize the debits from its account(s) on the destination ledger.
 
 ## Backend
@@ -172,14 +172,16 @@ As soon as the source transfer is prepared, the connector will authorize the deb
 
 ### Class: CurveParams
 ###### Fields
-| Type | Name | Description |
-|:--|:--|:--|
-| `String` | `source_ledger` | The URI of the source ledger |
-| `String` | `destination_ledger` | The URI of the destination ledger |
+| Type     | Name                   | Description |
+|:---------|:-----------------------|:--|
+| `String` | `source_ledger`        | The ILP prefix of the source ledger |
+| `String` | `destination_ledger`   | The ILP prefix of the destination ledger |
+| `String` | `source_currency`      | The source currency |
+| `String` | `destination_currency` | The destination currency |
 
 ### Class: Curve
 ###### Fields
-| Type | Name | Description |
-|:--|:--|:--|
-| `Point[]` | `points` | A list of `[source, destination]` points representing a liquidity curve |
-| `Object` | `additional_info` | (optional) |
+| Type      | Name              | Description |
+|:----------|:------------------|:--|
+| `Point[]` | `points`          | A list of `[sourceAmount:Number, destinationAmount:Number]` points representing a liquidity curve |
+| `Object`  | `additional_info` | Extra (optional) data to attach to the `Route` |
