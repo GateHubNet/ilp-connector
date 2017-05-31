@@ -28,4 +28,4 @@ DEBUG='*' CONNECTOR_LEDGERS='{
     }
   }
 
-}' CONNECTOR_BACKEND='@interledger/backend' CONNECTOR_BACKEND_URI='http://rates.staging.svc.cluster.local/v1' node src/index.js
+}' CONNECTOR_BACKEND='@interledger/backend' CONNECTOR_BACKEND_URI='http://rates.staging.svc.cluster.local/v1' node debug src/index.js
